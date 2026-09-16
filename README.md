@@ -244,6 +244,43 @@ failures remain for retry or removal.
 - **Size safety:** `cart_download` refuses items whose size is missing or unparseable
   rather than defaulting to `0 GiB`, which would bypass MouseSearch's buffer check.
 
+## Troubleshooting
+
+### `Head "https://ghcr.io/v2/logabell/mam-mcp/manifests/latest": unauthorized`
+
+The GHCR package is private and Docker is not logged in. Authenticate with a
+**classic** personal access token that has the `read:packages` scope:
+
+1. Create one at
+   <https://github.com/settings/tokens/new?scopes=read:packages&description=mam-mcp-docker-pull>
+2. Log in (as the same user that runs `docker compose`):
+
+   ```bash
+   echo <PAT> | docker login ghcr.io -u logabell --password-stdin
+   docker pull ghcr.io/logabell/mam-mcp:latest
+   ```
+
+`gh auth token` will **not** work here — it returns `403` for GHCR. If Docker runs
+as root (e.g. via `sudo` or rootful Portainer), log in as root too:
+`echo <PAT> | sudo docker login ghcr.io -u logabell --password-stdin`.
+
+Alternative: make the package public so no login is required (the image contains no
+secrets — credentials are only supplied at runtime via env vars). Go to
+<https://github.com/users/logabell/packages/container/mam-mcp/settings> →
+**Change visibility** → **Public**.
+
+### `(root) Additional property mam-mcp is not allowed`
+
+The `mam-mcp:` key is at the top level of the YAML instead of nested under
+`services:`. Keep the service block indented under the `services:` header (see
+[Option A](#3-add-the-container-to-your-stack) / [Option B](#option-b-standalone-compose-project)).
+
+### `search_mam` returns an authentication error
+
+The MAM session's allowed IP/ASN does not match the MCP's egress. Confirm
+`MAM_PROXY_URL` points at the same proxy MouseSearch uses, and that the dedicated
+MAM session allows the provider's ASN.
+
 ## Running from source
 
 ```bash
