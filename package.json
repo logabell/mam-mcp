@@ -1,0 +1,31 @@
+{
+  "name": "mam-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP server for MyAnonamouse search + MouseSearch download queueing",
+  "type": "module",
+  "bin": {
+    "mam-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "express": "^5.2.1",
+    "undici": "^8.10.2",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.20.3",
+    "tsx": "^4.23.13",
+    "typescript": "^5.9.0"
+  }
+}

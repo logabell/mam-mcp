@@ -1,0 +1,48 @@
+# Add this service to your existing Docker Compose stack (the one that already
+# runs gluetun, mousesearch, qbittorrent, etc.).
+#
+# The image is published to GHCR by the repo's GitHub Actions workflow:
+#   ghcr.io/logabell/mam-mcp:latest
+#
+# Before starting:
+#   1. Create a dedicated MyAnonamouse session (label "MouseSearch MCP",
+#      IP or ASN -> ASN, Dynamic Seedbox -> No) and copy its mam_id.
+#   2. Generate a token:  openssl rand -hex 32
+#   3. Replace <YOUR_STACK_NETWORK> below with the network your services share
+#      (run `docker network ls` and pick the compose project's network).
+#
+# If the GHCR package is private, log in once so Docker can pull it:
+#   echo <GITHUB_PAT> | docker login ghcr.io -u <github-user> --password-stdin
+
+services:
+  mam-mcp:
+    image: ghcr.io/logabell/mam-mcp:latest
+    # To build from a local checkout instead, comment out `image:` and use:
+    # build: .
+    container_name: mam-mcp
+    restart: unless-stopped
+    networks:
+      - <YOUR_STACK_NETWORK>
+    ports:
+      - "8765:8765"
+    volumes:
+      - mam-mcp-data:/data
+    environment:
+      - TZ=America/Chicago
+      - MAM_ID=${MAM_MCP_ID}
+      - MAM_API_BASE=https://www.myanonamouse.net
+      - MAM_PROXY_URL=http://gluetun:8888
+      - MAM_STATE_FILE=/data/mam-state.json
+      - CART_FILE=/data/cart.json
+      - MOUSESEARCH_URL=http://mousesearch:5000
+      - DEFAULT_CATEGORY=audiobooks
+      - DEFAULT_LANGUAGE=English
+      - MAX_RESULTS=50
+      - MCP_HTTP_BIND=0.0.0.0:8765
+      - MCP_API_TOKEN=${MAM_MCP_TOKEN}
+      - APP_LOG_LEVEL=INFO
+    depends_on:
+      - mousesearch
+
+volumes:
+  mam-mcp-data:
