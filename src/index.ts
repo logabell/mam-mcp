@@ -68,7 +68,10 @@ async function main(): Promise<void> {
 
   app.post(config.mcpPath, requireAuth, async (req: Request, res: Response) => {
     const server = createMcpServer(ctx);
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+      enableJsonResponse: true,
+    });
     res.on("close", () => {
       void transport.close();
       void server.close();

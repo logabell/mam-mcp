@@ -176,9 +176,62 @@ Generic remote MCP client config:
 }
 ```
 
-Because this is a LAN endpoint it is independent of your NPM/PocketID setup. If you
-later expose it publicly through NPM, keep the bearer token and put PocketID in
-front of it as an additional layer.
+Because this is a LAN endpoint it is independent of your NPM/PocketID setup. See
+[Using it from outside your LAN](#using-it-from-outside-your-lan) if you want to
+reach it from a hosted harness.
+
+## Using it from outside your LAN
+
+The MCP is designed to talk to MouseSearch **internally** (`http://mousesearch:5000`),
+so MouseSearch's public URL (`library.abell.tech`) and PocketID are irrelevant here.
+To use the MCP from a remote agent, expose **the MCP** through your reverse proxy on
+its own hostname — do **not** point the MCP at MouseSearch's public URL, and do not
+put PocketID in front of the MCP.
+
+Why not PocketID: MCP clients authenticate with the bearer token, not an interactive
+browser OIDC flow, so an identity provider in front would block them. The bearer
+token (plus TLS and, ideally, an IP allowlist) is the access control.
+
+Nginx Proxy Manager setup:
+
+- **Proxy host:** `mcp.abell.tech` (create a DNS record for it)
+- **Forward hostname/IP:** `mam-mcp` (or the container IP), **port:** `8765`
+- **Scheme:** `http`, **Block common exploits:** on, **Websockets support:** on
+- **SSL:** request a Let's Encrypt cert, force SSL
+- Advanced (recommended):
+
+  ```nginx
+  # Only allow your known agent network / IPs if possible.
+  # allow 203.0.113.0/24;
+  # deny all;
+
+  # Keep the endpoint reachable; MCP uses POST with JSON responses.
+  client_max_body_size 4m;
+  proxy_read_timeout 120s;
+  ```
+
+Then the harness URL becomes `https://mcp.abell.tech/mcp`:
+
+```json
+{
+  "mcpServers": {
+    "mam": {
+      "url": "https://mcp.abell.tech/mcp",
+      "headers": { "Authorization": "Bearer <MCP_API_TOKEN>" }
+    }
+  }
+}
+```
+
+Security notes for public exposure:
+
+- The bearer token is the **only** gate. Treat it like a password: use a long random
+  value and rotate it by updating `MCP_API_TOKEN` if it leaks.
+- Anyone with the token can queue downloads and consume your ratio/buffer. Restrict
+  by IP in NPM if your harness has a stable egress.
+- TLS is required; never expose the plain `8765` port to the internet.
+- The endpoint is stateless and returns plain JSON (no long-lived SSE), so it works
+  cleanly behind a normal reverse proxy.
 
 ## Configuration reference
 
