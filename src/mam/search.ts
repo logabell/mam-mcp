@@ -65,6 +65,9 @@ export interface SearchOutcome {
   perPage: number;
   offset: number;
   start: number;
+  total: number | null;
+  hasMore: boolean;
+  nextOffset: number;
   resolved: {
     mainCats: string[];
     categoryIds: string[];
@@ -73,6 +76,32 @@ export interface SearchOutcome {
     unknownMainCats: string[];
     unknownCategories: string[];
   };
+}
+
+export type FreeleechKind = "free" | "vip" | "personal" | "none";
+
+/**
+ * Collapses the three MAM freeleech flags into a single value so agents (and
+ * users) can tell at a glance whether a torrent costs buffer/ratio. `free`
+ * (global freeleech) and `vip` (VIP freeleech, applies while the account is VIP)
+ * cost nothing; `personal` only costs nothing when the cart item opts into
+ * spending a personal wedge via `usePersonalFreeleech`. `none` costs buffer.
+ */
+export function freeleechKind(
+  torrent: Pick<NormalizedTorrent, "free" | "vipFreeleech" | "personalFreeleech">,
+): FreeleechKind {
+  if (torrent.free) return "free";
+  if (torrent.vipFreeleech) return "vip";
+  if (torrent.personalFreeleech) return "personal";
+  return "none";
+}
+
+function pickCount(...values: unknown[]): number | null {
+  for (const value of values) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+  }
+  return null;
 }
 
 const SEARCH_FIELD_KEYS: Array<keyof SearchInput> = [
@@ -301,13 +330,15 @@ export async function searchMam(
 
   if (input.searchScope) params.set("tor[searchIn]", input.searchScope.trim());
 
-  const json = await client.getJson<{ data?: Array<Record<string, unknown>> }>(
+  const json = await client.getJson<{ data?: Array<Record<string, unknown>>; found?: number; total?: number }>(
     "/tor/js/loadSearchJSONbasic.php",
     { params },
   );
   const rawResults = Array.isArray(json.data) ? json.data : [];
   const base = `${config.mamApiBase}/tor/download.php/`;
   const results = rawResults.map((item) => normalizeResult(item, base, vipActive));
+  const total = pickCount(json.found, json.total);
+  const hasMore = total !== null ? offset + results.length < total : results.length === perPage;
 
   return {
     results,
@@ -315,6 +346,9 @@ export async function searchMam(
     perPage,
     offset,
     start: offset,
+    total,
+    hasMore,
+    nextOffset: offset + results.length,
     resolved: {
       mainCats: [...new Set(mainCats)],
       categoryIds: [...new Set(categoryIds)],

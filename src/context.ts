@@ -1,5 +1,6 @@
 import type { Config } from "./config.js";
 import type { MamClient } from "./mam/client.js";
+import { TorrentCache } from "./mam/cache.js";
 import type { MouseSearchClient } from "./mousesearch/client.js";
 import { isVipActive } from "./mousesearch/client.js";
 import type { CartStore } from "./cart/store.js";
@@ -13,6 +14,7 @@ export interface AppContext {
   mam: MamClient;
   mouseSearch: MouseSearchClient;
   cart: CartStore;
+  cache: TorrentCache;
   getVipActive(): Promise<boolean>;
 }
 
@@ -24,6 +26,7 @@ export function createContext(
   cart: CartStore,
 ): AppContext {
   let cached: { value: boolean; at: number } | null = null;
+  const cache = new TorrentCache();
 
   return {
     config,
@@ -31,6 +34,7 @@ export function createContext(
     mam,
     mouseSearch,
     cart,
+    cache,
     async getVipActive(): Promise<boolean> {
       const now = Date.now();
       if (cached && now - cached.at < VIP_CACHE_TTL_MS) return cached.value;

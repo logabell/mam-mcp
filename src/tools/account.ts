@@ -25,13 +25,14 @@ export function registerAccountTools(server: McpServer, ctx: AppContext): void {
           return errorContent(message);
         }
         const data = result.data;
+        const bufferGb = computeBufferGb(data);
         return jsonContent({
           username: data.username,
           seedbonus: data.seedbonus,
           uploaded: data.uploaded,
           downloaded: data.downloaded,
           ratio: data.ratio,
-          buffer_gb: computeBufferGb(data),
+          buffer_gb: bufferGb === null ? null : Math.round(bufferGb * 100) / 100,
           vip_active: isVipActive(data),
           vip_until: data.vip_until,
         });

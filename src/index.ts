@@ -21,8 +21,10 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(left, right);
 }
 
+const VERSION = "0.2.0";
+
 function createMcpServer(ctx: AppContext): McpServer {
-  const server = new McpServer({ name: "mam-mcp", version: "0.1.0" });
+  const server = new McpServer({ name: "mam-mcp", version: VERSION });
   registerSearchTool(server, ctx);
   registerFilterTools(server, ctx);
   registerAccountTools(server, ctx);
@@ -53,7 +55,7 @@ async function main(): Promise<void> {
   app.use(express.json({ limit: "4mb" }));
 
   app.get("/healthz", (_req: Request, res: Response) => {
-    res.json({ status: "ok", service: "mam-mcp", version: "0.1.0" });
+    res.json({ status: "ok", service: "mam-mcp", version: VERSION });
   });
 
   const requireAuth = (req: Request, res: Response, next: NextFunction): void => {

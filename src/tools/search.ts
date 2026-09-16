@@ -2,8 +2,104 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AppContext } from "../context.js";
 import { MamAuthError } from "../mam/client.js";
-import { searchMam } from "../mam/search.js";
+import { freeleechKind, searchMam, type NormalizedTorrent, type SearchOutcome } from "../mam/search.js";
 import { errorContent, jsonContent } from "./respond.js";
+
+interface EditionEntry {
+  mid: string;
+  title: string;
+  author: string;
+  format: "audiobook" | "ebook" | "other";
+  size?: string;
+  filetype?: string;
+  seeders: number;
+  freeleech: string;
+  added?: string;
+}
+
+interface EditionGroup {
+  title: string;
+  authors: string[];
+  entries: EditionEntry[];
+}
+
+function normalizedTitleKey(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/\[[^\]]*\]/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function formatOf(torrent: NormalizedTorrent): EditionEntry["format"] {
+  if (torrent.mainCat === "13") return "audiobook";
+  if (torrent.mainCat === "14") return "ebook";
+  return "other";
+}
+
+function groupEditions(results: NormalizedTorrent[]): EditionGroup[] {
+  const groups = new Map<string, EditionGroup>();
+  for (const torrent of results) {
+    const key = normalizedTitleKey(torrent.title);
+    if (!key) continue;
+    let group = groups.get(key);
+    if (!group) {
+      group = { title: torrent.title, authors: [], entries: [] };
+      groups.set(key, group);
+    }
+    if (torrent.author && !group.authors.includes(torrent.author)) group.authors.push(torrent.author);
+    group.entries.push({
+      mid: torrent.mid,
+      title: torrent.title,
+      author: torrent.author,
+      format: formatOf(torrent),
+      size: torrent.size || undefined,
+      filetype: torrent.filetype || undefined,
+      seeders: torrent.seeders,
+      freeleech: freeleechKind(torrent),
+      added: torrent.added || undefined,
+    });
+  }
+  return [...groups.values()].filter((group) => group.entries.length > 0);
+}
+
+function resultView(torrent: NormalizedTorrent): Record<string, unknown> {
+  return {
+    mid: torrent.mid,
+    title: torrent.title,
+    author: torrent.author,
+    narrator: torrent.narrator || undefined,
+    series: torrent.series || undefined,
+    seriesRaw: torrent.seriesRaw || undefined,
+    size: torrent.size || undefined,
+    seeders: torrent.seeders,
+    leechers: torrent.leechers,
+    snatches: torrent.snatches,
+    mainCat: torrent.mainCat,
+    catname: torrent.catname || undefined,
+    filetype: torrent.filetype || undefined,
+    free: torrent.free,
+    vipFreeleech: torrent.vipFreeleech,
+    personalFreeleech: torrent.personalFreeleech,
+    freeleech: freeleechKind(torrent),
+    language: torrent.language || undefined,
+    added: torrent.added || undefined,
+    downloadLink: torrent.downloadLink || undefined,
+  };
+}
+
+function paginationView(outcome: SearchOutcome): Record<string, unknown> {
+  return {
+    count: outcome.results.length,
+    page: outcome.page,
+    perPage: outcome.perPage,
+    start: outcome.start,
+    nextOffset: outcome.nextOffset,
+    total: outcome.total,
+    hasMore: outcome.hasMore,
+  };
+}
 
 export function registerSearchTool(server: McpServer, ctx: AppContext): void {
   server.registerTool(
@@ -13,7 +109,10 @@ export function registerSearchTool(server: McpServer, ctx: AppContext): void {
       description:
         "Search MyAnonamouse. Supports the full advanced-filter set (media type, subcategory, language, " +
         "seeders/leechers/snatches, size range, dates, flags, freeleech). Returns torrents with their MID " +
-        "(use as `mid` when adding to the cart). Results use MAM's native ordering (sort=default|seeders|size|date...).",
+        "(use as `mid` when adding to the cart). Results use MAM's native ordering (sort=default|seeders|size|date...). " +
+        "`startDate`/`endDate` filter the date the torrent was ADDED to MAM, not its publication year. " +
+        "Set groupEditions=true to get results grouped by title so audiobook/ebook editions of the same book " +
+        "are returned together.",
       inputSchema: {
         query: z.string().optional().describe("Free-text search query"),
         searchInTitle: z.boolean().optional(),
@@ -37,8 +136,8 @@ export function registerSearchTool(server: McpServer, ctx: AppContext): void {
           .optional()
           .describe('Browse flag ids, e.g. ["1"] for VIP/freeleech flags. Pair with flagsMode.'),
         flagsMode: z.enum(["show", "hide"]).optional().describe("Whether flags filter shows or hides matches."),
-        startDate: z.string().optional().describe("YYYY-MM-DD lower bound on upload date"),
-        endDate: z.string().optional().describe("YYYY-MM-DD upper bound on upload date"),
+        startDate: z.string().optional().describe("YYYY-MM-DD lower bound on the date the torrent was added to MAM"),
+        endDate: z.string().optional().describe("YYYY-MM-DD upper bound on the date the torrent was added to MAM"),
         minSize: z.number().optional().describe("Minimum size in `sizeUnit`"),
         maxSize: z.number().optional().describe("Maximum size in `sizeUnit`"),
         sizeUnit: z.enum(["B", "KB", "KiB", "MB", "MiB", "GB", "GiB", "TB", "TiB"]).optional(),
@@ -59,39 +158,24 @@ export function registerSearchTool(server: McpServer, ctx: AppContext): void {
           .describe('MAM sortType, e.g. "default", "seeders", "size", "date", "snatched". Default "default".'),
         page: z.number().int().min(0).optional().describe("Zero-based page index"),
         perPage: z.number().int().min(1).max(200).optional().describe("Results per page (default MAX_RESULTS)"),
+        groupEditions: z
+          .boolean()
+          .optional()
+          .describe("Group results by title so audiobook/ebook editions of the same book appear together."),
       },
     },
     async (args) => {
       try {
         const vipActive = await ctx.getVipActive();
-        const outcome = await searchMam(ctx.mam, ctx.config, args, vipActive);
+        const { groupEditions: shouldGroup, ...searchArgs } = args;
+        const outcome = await searchMam(ctx.mam, ctx.config, searchArgs, vipActive);
+        ctx.cache.remember(outcome.results);
+
         return jsonContent({
-          count: outcome.results.length,
-          page: outcome.page,
-          perPage: outcome.perPage,
-          start: outcome.start,
+          ...paginationView(outcome),
           resolvedFilters: outcome.resolved,
-          results: outcome.results.map((torrent) => ({
-            mid: torrent.mid,
-            title: torrent.title,
-            author: torrent.author,
-            narrator: torrent.narrator || undefined,
-            series: torrent.series || undefined,
-            seriesRaw: torrent.seriesRaw || undefined,
-            size: torrent.size || undefined,
-            seeders: torrent.seeders,
-            leechers: torrent.leechers,
-            snatches: torrent.snatches,
-            mainCat: torrent.mainCat,
-            catname: torrent.catname || undefined,
-            filetype: torrent.filetype || undefined,
-            free: torrent.free,
-            vipFreeleech: torrent.vipFreeleech,
-            personalFreeleech: torrent.personalFreeleech,
-            language: torrent.language || undefined,
-            added: torrent.added || undefined,
-            downloadLink: torrent.downloadLink || undefined,
-          })),
+          results: outcome.results.map(resultView),
+          ...(shouldGroup ? { editions: groupEditions(outcome.results) } : {}),
         });
       } catch (error) {
         if (error instanceof MamAuthError) {

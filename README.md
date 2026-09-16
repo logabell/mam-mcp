@@ -136,17 +136,31 @@ belongs to another compose project, and `depends_on` only works within a project
 
 ## 4. Verify
 
-```bash
-curl http://<homelab-ip>:8765/healthz
-# {"status":"ok","service":"mam-mcp","version":"0.1.0"}
+Keep the token out of your shell history by sourcing a `.env` file rather than
+putting it on the command line:
 
-TOKEN=<MCP_API_TOKEN>
-curl -s -X POST http://<homelab-ip>:8765/mcp \
-  -H "Authorization: Bearer $TOKEN" \
+```bash
+cat > .env <<'EOF'
+MAM_MCP_URL=http://<homelab-ip>:8765/mcp
+MAM_MCP_TOKEN=<MCP_API_TOKEN>
+EOF
+set -a && . ./.env && set +a
+
+curl http://<homelab-ip>:8765/healthz
+# {"status":"ok","service":"mam-mcp","version":"0.2.0"}
+
+curl -s -X POST "$MAM_MCP_URL" \
+  -H "Authorization: Bearer $MAM_MCP_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 ```
+
+The MCP SDK requires POST requests to advertise both `application/json` and
+`text/event-stream` in `Accept`. This server is stateless and built with
+`enableJsonResponse`, so the response body is a plain JSON-RPC object
+(`Content-Type: application/json`) — no SSE parser is needed. A `text/event-stream`
+response only appears for an SSE-only client.
 
 A `401` means the bearer token is wrong. A JSON-RPC result listing the tools means
 you are ready to connect a harness. If `search_mam` returns an auth error later,
@@ -162,6 +176,10 @@ Required headers on every request:
 Authorization: Bearer <MCP_API_TOKEN>
 Accept: application/json, text/event-stream
 ```
+
+Both content types are required by the MCP SDK, but responses are plain JSON
+(see [step 4](#4-verify)). The endpoint is stateless and returns no long-lived
+stream, so it works cleanly behind a normal reverse proxy.
 
 Generic remote MCP client config:
 
@@ -261,29 +279,51 @@ redacted from all log output.
 
 | Tool | Purpose |
 |---|---|
-| `search_mam` | Full advanced-filter MAM search: text scope (title/author/series/narrator/description/tags/filenames), main category, subcategory, language, seeders/leechers/snatches, size range, upload dates, browse flags, `searchType` (all/active/fl), sort, paging. |
+| `search_mam` | Full advanced-filter MAM search: text scope (title/author/series/narrator/description/tags/filenames), main category, subcategory, language, seeders/leechers/snatches, size range, upload dates, browse flags, `searchType` (all/active/fl), sort, paging. Returns `total`/`hasMore`/`nextOffset` for paging, a derived `freeleech` kind, and (with `groupEditions`) results grouped by title so audiobook/ebook editions sit together. |
 | `get_filter_options` | Main categories, subcategories, and languages with numeric ids. |
 | `get_account_stats` | Ratio, uploaded/downloaded, buffer, seed bonus, VIP status. |
-| `cart_add` | Queue a search result (does not download). |
-| `cart_list` / `cart_remove` / `cart_clear` | Manage the persistent cart. |
-| `cart_download` | Commit the cart to MouseSearch `/client/add`. |
-| `get_download_status` | Live torrent status for MIDs and/or hashes. |
+| `cart_add` | Queue torrents without downloading: `torrent` (one), `torrents` (batch), or `mids` (MIDs from a `search_mam` earlier in the session). Reports whether each item is already in the client. |
+| `cart_list` / `cart_remove` / `cart_clear` | Manage the persistent cart (`cart_list` supports `verbose`/`fields`). |
+| `cart_preview` | Dry run: totals the cart split into free vs buffer-costing, and compares against your buffer. |
+| `cart_download` | Commit the cart to MouseSearch `/client/add`. Skips torrents already in the client (`already_present`); supports `dryRun`. |
+| `get_download_status` | Live torrent status for MIDs and/or hashes (compact summary; `verbose`/`fields` for detail). |
 | `check_library` | Whether a MID is already in your torrent client. |
 | `get_client_status` | MouseSearch ↔ torrent-client connectivity. |
 | `list_client_categories` | Categories available in your torrent client. |
 
+### Freeleech semantics
+
+Each result reports a derived `freeleech` value, plus the raw flags:
+
+| `freeleech` | Meaning | Costs buffer? |
+|---|---|---|
+| `free` | Global freeleech | No |
+| `vip` | VIP freeleech (account is VIP) | No |
+| `personal` | Personal freeleech available on the torrent | Only if you opt in |
+| `none` | Not freeleech | Yes |
+
+`cart_add`'s `usePersonalFreeleech` (default `false`) spends a bonus-earned
+personal wedge. `cart_preview` treats everything except `none` as zero buffer
+cost, so you can confirm the paid total before committing.
+
 ## Usage workflow
 
-1. `search_mam { query: "project hail mary", mainCats: ["Audiobooks"], searchInAuthor: true, minSeeders: 1 }`
+1. `search_mam { query: "project hail mary", mainCats: ["Audiobooks","Ebooks"], searchInTitle: true, minSeeders: 1, groupEditions: true }`
 2. `check_library { mids: ["12345", "67890"] }` to skip anything already downloaded
-3. `cart_add { torrent: <result object>, usePersonalFreeleech: false }` for each pick
-4. `cart_list` to review the queue
+3. `cart_add { mids: ["12345", "67890"], usePersonalFreeleech: false }` — add picks by MID (from the search above), or pass full `torrent`/`torrents` objects
+4. `cart_list` to review the queue, then `cart_preview` to see free vs paid size against your buffer
 5. `cart_download {}` — MouseSearch performs its buffer check, freeleech handling,
    category assignment, and auto-organization. Items that hit `insufficient_buffer`
    stay in the cart and are reported back with the shortfall and recommended purchase.
 
 Successful items are removed from the cart by default (`removeOnSuccess: true`);
-failures remain for retry or removal.
+failures remain for retry or removal. Items already in the client are reported as
+`already_present` and skipped. `cart_download { dryRun: true }` previews without
+committing.
+
+> The MID → torrent cache is per-process and in-memory, so `cart_add { mids }`
+> only works for MIDs returned by a `search_mam` in the same process lifetime.
+> The full-object form (`torrent`/`torrents`) always works.
 
 ## Intentional differences from the MouseSearch UI
 

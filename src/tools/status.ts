@@ -44,10 +44,16 @@ export function registerStatusTools(server: McpServer, ctx: AppContext): void {
       title: "Get download status",
       description:
         "Look up live torrent status for MIDs and/or torrent hashes. MIDs are resolved to hashes through " +
-        "MouseSearch before polling.",
+        "MouseSearch before polling. Returns a compact summary per torrent by default; pass verbose=true or a " +
+        "`fields` list for more detail.",
       inputSchema: {
         mids: z.array(z.string()).optional(),
         hashes: z.array(z.string()).optional().describe("Torrent info hashes returned by cart_download"),
+        verbose: z.boolean().optional().describe("Return the full qBittorrent object per torrent (default false)"),
+        fields: z
+          .array(z.string())
+          .optional()
+          .describe("Subset of torrent fields to return (ignored when verbose=true)"),
       },
     },
     async (args) => {
@@ -64,8 +70,34 @@ export function registerStatusTools(server: McpServer, ctx: AppContext): void {
             notFound.push(mid);
           }
         }
-        const torrents = hashes.size > 0 ? await ctx.mouseSearch.getTorrentInfoBatch([...hashes]) : {};
-        return jsonContent({ resolvedMids, notFoundMids: notFound, torrents });
+        const torrents =
+          hashes.size > 0 ? await ctx.mouseSearch.getTorrentInfoBatch([...hashes]) : ({} as Record<string, unknown>);
+
+        const defaultFields = [
+          "name",
+          "state",
+          "progress",
+          "size",
+          "downloaded",
+          "amount_left",
+          "eta",
+          "dlspeed",
+          "upspeed",
+          "ratio",
+          "category",
+        ];
+        const keys = args.fields && args.fields.length > 0 ? args.fields : defaultFields;
+        const projected: Record<string, unknown> = {};
+        for (const [hash, torrent] of Object.entries(torrents)) {
+          if (args.verbose || torrent === null || typeof torrent !== "object") {
+            projected[hash] = torrent;
+            continue;
+          }
+          const record = torrent as Record<string, unknown>;
+          projected[hash] = Object.fromEntries(keys.filter((key) => key in record).map((key) => [key, record[key]]));
+        }
+
+        return jsonContent({ resolvedMids, notFoundMids: notFound, torrents: projected });
       } catch (error) {
         return errorContent(`get_download_status failed: ${error instanceof Error ? error.message : String(error)}`);
       }
