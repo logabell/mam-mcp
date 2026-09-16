@@ -1,0 +1,52 @@
+# Standalone compose project for mam-mcp.
+#
+# Use this if you keep mam-mcp in its own directory (e.g. /home/logabell/docker/mam-mcp)
+# instead of adding the service to your main stack's compose file.
+#
+# It joins your EXISTING stack's network as an external network so it can reach
+# `mousesearch` and `gluetun` by service name.
+#
+# Setup:
+#   1. Find your stack network name:   docker network ls
+#   2. Create a .env file next to this file with:
+#        STACK_NETWORK=<the network name from step 1>
+#        MAM_MCP_ID=<dedicated MAM session cookie>
+#        MAM_MCP_TOKEN=<openssl rand -hex 32>
+#   3. docker compose up -d
+#
+# Note: `depends_on` is intentionally omitted — mousesearch lives in a different
+# compose project, and depends_on only works within the same project.
+
+services:
+  mam-mcp:
+    image: ghcr.io/logabell/mam-mcp:latest
+    container_name: mam-mcp
+    restart: unless-stopped
+    networks:
+      - stack
+    ports:
+      - "8765:8765"
+    volumes:
+      - mam-mcp-data:/data
+    environment:
+      - TZ=America/Chicago
+      - MAM_ID=${MAM_MCP_ID:?set MAM_MCP_ID in .env}
+      - MAM_API_BASE=https://www.myanonamouse.net
+      - MAM_PROXY_URL=http://gluetun:8888
+      - MAM_STATE_FILE=/data/mam-state.json
+      - CART_FILE=/data/cart.json
+      - MOUSESEARCH_URL=http://mousesearch:5000
+      - DEFAULT_CATEGORY=audiobooks
+      - DEFAULT_LANGUAGE=English
+      - MAX_RESULTS=50
+      - MCP_HTTP_BIND=0.0.0.0:8765
+      - MCP_API_TOKEN=${MAM_MCP_TOKEN:?set MAM_MCP_TOKEN in .env}
+      - APP_LOG_LEVEL=INFO
+
+networks:
+  stack:
+    external: true
+    name: ${STACK_NETWORK:?set STACK_NETWORK in .env}
+
+volumes:
+  mam-mcp-data:

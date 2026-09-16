@@ -113,6 +113,27 @@ docker compose logs -f mam-mcp
 To build from a local checkout instead of pulling, comment out `image:` in the
 snippet and uncomment `build: .`.
 
+### Option B: standalone compose project
+
+If you prefer to keep mam-mcp in its own directory (e.g.
+`/home/logabell/docker/mam-mcp`), use [`compose.standalone.yaml`](compose.standalone.yaml)
+instead. It joins your existing stack's network as an **external** network.
+
+Create a `.env` next to it (Compose auto-loads it for variable substitution):
+
+```bash
+STACK_NETWORK=<name from `docker network ls`>
+MAM_MCP_ID=<dedicated MAM session cookie>
+MAM_MCP_TOKEN=<token from step 2>
+```
+
+Then `docker compose up -d`. `depends_on` is omitted on purpose — `mousesearch`
+belongs to another compose project, and `depends_on` only works within a project.
+
+> **Common error:** `(root) Additional property mam-mcp is not allowed` means the
+> `mam-mcp:` key is at the top level of the YAML rather than nested under
+> `services:`. Keep the service block indented under the `services:` header.
+
 ## 4. Verify
 
 ```bash
