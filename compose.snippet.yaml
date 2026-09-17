@@ -28,7 +28,7 @@ services:
     volumes:
       - mam-mcp-data:/data
     environment:
-      - TZ=America/Chicago
+      - TZ=Etc/UTC
       - MAM_ID=${MAM_MCP_ID}
       - MAM_API_BASE=https://www.myanonamouse.net
       - MAM_PROXY_URL=http://gluetun:8888

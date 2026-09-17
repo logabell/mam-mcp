@@ -1,6 +1,6 @@
 # Standalone compose project for mam-mcp.
 #
-# Use this if you keep mam-mcp in its own directory (e.g. /home/logabell/docker/mam-mcp)
+# Use this if you keep mam-mcp in its own directory (e.g. ~/docker/mam-mcp)
 # instead of adding the service to your main stack's compose file.
 #
 # It joins your EXISTING stack's network as an external network so it can reach
@@ -29,7 +29,7 @@ services:
     volumes:
       - mam-mcp-data:/data
     environment:
-      - TZ=America/Chicago
+      - TZ=Etc/UTC
       - MAM_ID=${MAM_MCP_ID:?set MAM_MCP_ID in .env}
       - MAM_API_BASE=https://www.myanonamouse.net
       - MAM_PROXY_URL=http://gluetun:8888

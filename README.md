@@ -1,52 +1,134 @@
 # mam-mcp
 
-A remote (Streamable HTTP) [Model Context Protocol](https://modelcontextprotocol.io)
-server that lets an AI agent search MyAnonamouse and queue downloads through an
-existing [MouseSearch](https://github.com/sevenlayercookie/MouseSearch) instance.
+A remote [Model Context Protocol](https://modelcontextprotocol.io) (Streamable
+HTTP) server that lets an AI agent **search MyAnonamouse** and **queue downloads**
+through an existing [MouseSearch](https://github.com/sevenlayercookie/MouseSearch)
+instance.
 
-- **Search** happens inside the MCP using MAM's documented `loadSearchJSONbasic.php` API.
+It is a small, stateless HTTP service. Run it on the same network as MouseSearch
+for **LAN-only** use, or publish it behind a reverse proxy on a DNS name to drive
+it from a hosted agent anywhere. Either way, the server authenticates callers with
+a bearer token and keeps downloading as a separate, explicit step.
+
+```
+                            ┌─────────────┐        ┌──────────────┐
+  agent harness ──Bearer──► │   mam-mcp   │──────► │  MouseSearch │──► qBittorrent
+  (LAN or internet)         │  :8765/mcp  │        │  :5000       │
+                            └──────┬──────┘        └──────┬───────┘
+                                   │ MAM search API        │ same egress
+                                   ▼                       ▼
+                              MAM (via HTTP proxy)   qBittorrent
+```
+
+- **Search** runs inside the MCP using MAM's documented `loadSearchJSONbasic.php` API.
 - **Downloads** are delegated to MouseSearch's `POST /client/add`, so buffer checks,
-  freeleech handling, categories, path templates, and auto-organization all behave
-  exactly as a UI-initiated download.
-- **Never** touches your MouseSearch web UI or its public/NPM/PocketID URL — it talks
-  to MouseSearch by Docker service name on the internal network.
+  freeleech handling, categories, path templates, and auto-organization behave
+  exactly like a UI-initiated download.
+- **Never** touches the MouseSearch web UI or its public/OIDC URL — it talks to
+  MouseSearch's internal API only.
+
+Jump to: [Deployment topologies](#deployment-topologies) ·
+[Architecture](#architecture) · [Quick start](#quick-start) ·
+[Configuration](#configuration-reference) · [Tools](#tools)
+
+## Highlights
+
+- **Full advanced search** — title/author/series/narrator/description/tags/filenames,
+  category, subcategory, language, seeders/leechers/snatches, size, upload dates,
+  browse flags, freeleech, sorting, paging.
+- **Batch cart workflow** — add by full result, in a batch, or by MID; preview the
+  buffer impact before committing; skip torrents already in your client.
+- **Edition grouping** — pair the audiobook and ebook of the same title in one group.
+- **Buffer-aware** — `cart_preview` splits free vs buffer-costing size and compares
+  against your account buffer; `cart_download` refuses unparseable sizes and never
+  silently bypasses MouseSearch's checks.
+- **Freeleech transparency** — every result reports a derived `freeleech` kind
+  (`free` / `vip` / `personal` / `none`) so nothing spends buffer or bonus wedges
+  unexpectedly.
+- **Stateless & proxy-friendly** — plain JSON-RPC responses, no long-lived SSE.
+
+## Deployment topologies
+
+**LAN-only.** The MCP and MouseSearch share a network; the agent runs on the same
+LAN. Simplest and nothing is exposed to the internet.
+
+```
+agent (LAN) ──http──► mam-mcp :8765 ──http──► mousesearch :5000
+```
+
+**Public (remote agent).** Expose **only the MCP** through a reverse proxy with TLS;
+keep MouseSearch internal.
+
+```
+agent (internet) ──https+Bearer──► reverse proxy ──http──► mam-mcp :8765 ──http──► mousesearch :5000
+```
+
+The bearer token (plus TLS, and ideally an IP allowlist) is the access control.
+Do **not** put an interactive OIDC gateway in front of the MCP — MCP clients speak
+bearer tokens, not browser logins. See [Exposing the MCP publicly](#exposing-the-mcp-publicly).
 
 ## Contents
 
+- [Highlights](#highlights)
+- [Deployment topologies](#deployment-topologies)
+- [Requirements](#requirements)
 - [Architecture](#architecture)
 - [Quick start](#quick-start)
-- [1. Create a dedicated MAM session](#1-create-a-dedicated-mam-session)
-- [2. Generate an API token](#2-generate-an-api-token)
-- [3. Add the container to your stack](#3-add-the-container-to-your-stack)
-- [4. Verify](#4-verify)
-- [5. Connect an agent harness](#5-connect-an-agent-harness)
+  - [1. Create a dedicated MAM session](#1-create-a-dedicated-mam-session)
+  - [2. Generate an API token](#2-generate-an-api-token)
+  - [3. Run the server](#3-run-the-server)
+  - [4. Verify](#4-verify)
+  - [5. Connect an agent harness](#5-connect-an-agent-harness)
+- [Exposing the MCP publicly](#exposing-the-mcp-publicly)
 - [Configuration reference](#configuration-reference)
 - [Tools](#tools)
 - [Usage workflow](#usage-workflow)
 - [Intentional differences from the MouseSearch UI](#intentional-differences-from-the-mousesearch-ui)
 - [Running from source](#running-from-source)
+- [Troubleshooting](#troubleshooting)
 - [Publishing the image](#publishing-the-image)
+- [Security notes](#security-notes)
 - [Compliance note](#compliance-note)
+
+## Requirements
+
+- An existing [MouseSearch](https://github.com/sevenlayercookie/MouseSearch)
+  instance (it proxies MAM stats and the torrent client) with a reachable internal
+  API.
+- A qBittorrent client configured in MouseSearch.
+- A MyAnonamouse account with a **dedicated** session cookie (see below).
+- Docker (recommended) or Node.js >= 20 for [running from source](#running-from-source).
+- Optional but recommended: an HTTP proxy (e.g. [gluetun](https://github.com/qdm12/gluetun))
+  so MAM traffic and MouseSearch share the same egress IP/ASN.
 
 ## Architecture
 
 ```
-agent harness (LAN) ── Bearer token ──► mam-mcp :8765/mcp
-                                          │
-                     http://gluetun:8888 ◄─┤ MAM search API (dedicated session)
-                     http://mousesearch:5000 ◄─┘ /client/add, /mam/user_data,
-                                                 /client/info/batch, /client/resolve_mid
+agent harness ── Bearer token ──► mam-mcp :8765/mcp
+                                     │
+                    MAM search API ◄──┤ via MAM_PROXY_URL (dedicated session)
+                    MouseSearch    ◄──┘ /client/add, /mam/user_data,
+                                         /client/info/batch, /client/resolve_mid
 ```
 
-- The MCP reaches MouseSearch by Docker service name, so it never needs the public
-  NPM/PocketID URL.
-- MAM traffic uses the same proxy egress as MouseSearch (`MAM_PROXY_URL`), so both
-  present the same public IP/ASN to the tracker.
+- `search_mam` calls MAM's documented search API directly (through `MAM_PROXY_URL`).
+- Everything else (account stats, client status, duplicate checks, adding torrents)
+  goes to MouseSearch's internal endpoints.
+- MouseSearch is addressed by its service name / internal host, so its public URL
+  (and any OIDC gateway in front of it) is irrelevant to the MCP.
+- MAM traffic uses the same proxy egress as MouseSearch, so both present the same
+  public IP/ASN to the tracker and the dedicated session stays valid.
 
 ## Quick start
 
-The published image is `ghcr.io/logabell/mam-mcp:latest` (built by
-[`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml)).
+The image is published to GitHub Container Registry by
+[`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml):
+
+```
+ghcr.io/logabell/mam-mcp:latest
+```
+
+If you prefer, [build the image locally](#running-from-source) instead of pulling.
 
 1. Create a dedicated MAM session and copy its `mam_id`.
 2. Generate an API token.
@@ -54,9 +136,7 @@ The published image is `ghcr.io/logabell/mam-mcp:latest` (built by
    to your stack and `docker compose up -d mam-mcp`.
 4. Hit `/healthz`, then point your agent at `http://<homelab-ip>:8765/mcp`.
 
-Details for each step below.
-
-## 1. Create a dedicated MAM session
+### 1. Create a dedicated MAM session
 
 On the MyAnonamouse [Security page](https://www.myanonamouse.net/preferences/index.php?view=security),
 create a **second, dedicated** session:
@@ -76,7 +156,7 @@ The MCP persists any rotated `mam_id` to `MAM_STATE_FILE` (on the `mam-mcp-data`
 volume), so restarts continue with the latest cookie. Supplying a new `MAM_ID`
 always takes precedence and replaces the stored one.
 
-## 2. Generate an API token
+### 2. Generate an API token
 
 ```bash
 openssl rand -hex 32
@@ -86,16 +166,78 @@ Use it as `MCP_API_TOKEN` (and `MAM_MCP_TOKEN` in the compose snippet). The agen
 must send it as `Authorization: Bearer <token>`. The token must be at least 16
 characters or the server refuses to start.
 
-## 3. Add the container to your stack
+### 3. Run the server
 
-Copy the service from [`compose.snippet.yaml`](compose.snippet.yaml) into the compose
-file that already runs `gluetun`, `mousesearch`, and `qbittorrent`, then replace:
+`mam-mcp` talks to MouseSearch and the MAM proxy **by their Docker service names**,
+so the easiest install is to run it on the same network as your existing stack.
 
-| Placeholder | Meaning |
-|---|---|
-| `<YOUR_STACK_NETWORK>` | The network your services share (`docker network ls`, pick the compose project's net) |
-| `MAM_MCP_ID` | The dedicated `mam_id` from step 1 |
-| `MAM_MCP_TOKEN` | The token from step 2 |
+Create a directory (e.g. `~/docker/mam-mcp`) with a `docker-compose.yml`:
+
+```yaml
+# docker-compose.yml
+services:
+  mam-mcp:
+    image: ghcr.io/logabell/mam-mcp:latest
+    container_name: mam-mcp
+    restart: unless-stopped
+    networks:
+      - stack
+    ports:
+      - "8765:8765"          # LAN access; put a reverse proxy in front for public use
+    volumes:
+      - mam-mcp-data:/data
+    environment:
+      - TZ=Etc/UTC
+      - MAM_ID=${MAM_MCP_ID:?set MAM_MCP_ID in .env}
+      - MAM_API_BASE=https://www.myanonamouse.net
+      - MAM_PROXY_URL=http://gluetun:8888
+      - MAM_STATE_FILE=/data/mam-state.json
+      - CART_FILE=/data/cart.json
+      - MOUSESEARCH_URL=http://mousesearch:5000
+      - DEFAULT_CATEGORY=audiobooks
+      - DEFAULT_LANGUAGE=English
+      - MAX_RESULTS=50
+      - MCP_HTTP_BIND=0.0.0.0:8765
+      - MCP_API_TOKEN=${MAM_MCP_TOKEN:?set MAM_MCP_TOKEN in .env}
+      - APP_LOG_LEVEL=INFO
+
+networks:
+  stack:
+    external: true
+    name: ${STACK_NETWORK:?set STACK_NETWORK in .env}
+
+volumes:
+  mam-mcp-data:
+```
+
+And a `.env` next to it (Compose loads it automatically):
+
+```bash
+STACK_NETWORK=<your existing stack's network; see `docker network ls`>
+MAM_MCP_ID=<dedicated MAM session cookie from step 1>
+MAM_MCP_TOKEN=<token from step 2>
+```
+
+Then start it:
+
+```bash
+docker compose up -d
+docker compose logs -f mam-mcp
+```
+
+Adjust to match your environment:
+
+- `MAM_PROXY_URL` — point at your HTTP proxy, or remove it if MAM is reached directly.
+- `MOUSESEARCH_URL` — the internal address of MouseSearch.
+- `TZ` — your timezone.
+
+To build from a local checkout instead of pulling the image, replace `image:` with
+`build: .`.
+
+**Prefer to add it to an existing stack?** Copy just the `mam-mcp` service from
+[`compose.snippet.yaml`](compose.snippet.yaml) into your stack's compose file (it
+references `gluetun` and `mousesearch` directly). [`compose.standalone.yaml`](compose.standalone.yaml)
+is the standalone example above as a ready-made file.
 
 If the GHCR package is private, log Docker in once so it can pull:
 
@@ -103,38 +245,11 @@ If the GHCR package is private, log Docker in once so it can pull:
 echo <GITHUB_PAT> | docker login ghcr.io -u <github-user> --password-stdin
 ```
 
-Then start it:
-
-```bash
-docker compose up -d mam-mcp
-docker compose logs -f mam-mcp
-```
-
-To build from a local checkout instead of pulling, comment out `image:` in the
-snippet and uncomment `build: .`.
-
-### Option B: standalone compose project
-
-If you prefer to keep mam-mcp in its own directory (e.g.
-`/home/logabell/docker/mam-mcp`), use [`compose.standalone.yaml`](compose.standalone.yaml)
-instead. It joins your existing stack's network as an **external** network.
-
-Create a `.env` next to it (Compose auto-loads it for variable substitution):
-
-```bash
-STACK_NETWORK=<name from `docker network ls`>
-MAM_MCP_ID=<dedicated MAM session cookie>
-MAM_MCP_TOKEN=<token from step 2>
-```
-
-Then `docker compose up -d`. `depends_on` is omitted on purpose — `mousesearch`
-belongs to another compose project, and `depends_on` only works within a project.
-
 > **Common error:** `(root) Additional property mam-mcp is not allowed` means the
 > `mam-mcp:` key is at the top level of the YAML rather than nested under
 > `services:`. Keep the service block indented under the `services:` header.
 
-## 4. Verify
+### 4. Verify
 
 Keep the token out of your shell history by sourcing a `.env` file rather than
 putting it on the command line:
@@ -159,16 +274,16 @@ curl -s -X POST "$MAM_MCP_URL" \
 The MCP SDK requires POST requests to advertise both `application/json` and
 `text/event-stream` in `Accept`. This server is stateless and built with
 `enableJsonResponse`, so the response body is a plain JSON-RPC object
-(`Content-Type: application/json`) — no SSE parser is needed. A `text/event-stream`
-response only appears for an SSE-only client.
+(`Content-Type: application/json`) — no SSE parser is needed.
 
 A `401` means the bearer token is wrong. A JSON-RPC result listing the tools means
 you are ready to connect a harness. If `search_mam` returns an auth error later,
 re-check that the MAM session's allowed IP/ASN matches the proxy egress.
 
-## 5. Connect an agent harness
+### 5. Connect an agent harness
 
-Endpoint: `http://<homelab-ip>:8765/mcp` (LAN only; no PocketID involved).
+Endpoint: `http://<homelab-ip>:8765/mcp` (LAN) or `https://<mcp-host>/mcp`
+(public — see [Exposing the MCP publicly](#exposing-the-mcp-publicly)).
 
 Required headers on every request:
 
@@ -177,126 +292,89 @@ Authorization: Bearer <MCP_API_TOKEN>
 Accept: application/json, text/event-stream
 ```
 
-Both content types are required by the MCP SDK, but responses are plain JSON
-(see [step 4](#4-verify)). The endpoint is stateless and returns no long-lived
-stream, so it works cleanly behind a normal reverse proxy.
-
+Both content types are required by the MCP SDK, but responses are plain JSON.
 Generic remote MCP client config:
 
 ```json
 {
   "mcpServers": {
     "mam": {
-      "url": "http://192.168.1.50:8765/mcp",
+      "url": "http://<homelab-ip>:8765/mcp",
       "headers": { "Authorization": "Bearer <MCP_API_TOKEN>" }
     }
   }
 }
 ```
 
-Because this is a LAN endpoint it is independent of your NPM/PocketID setup. See
-[Using it from outside your LAN](#using-it-from-outside-your-lan) if you want to
-reach it from a hosted harness.
+## Exposing the MCP publicly
 
-## Using it from outside your LAN
-
-There are two links in the chain, and they want opposite treatment:
-
-```
-remote harness ──HTTPS + Bearer──► MCP (public, via reverse proxy)
-                                     └── internal only ──► MouseSearch ──► gluetun ──► MAM
-```
-
-- **Expose the MCP.** Put it behind your reverse proxy on its own hostname and
-  authenticate with the bearer token.
-- **Keep MouseSearch internal.** Do **not** point the MCP at MouseSearch's public
-  URL, and do not put PocketID in front of the MCP. MouseSearch's public hostname
-  is UI-only and PocketID-protected, so the MCP's headless `/client/*` and
-  `/mam/user_data` calls would be redirected to an HTML login page instead of
-  returning JSON.
-
-Why not PocketID: MCP clients authenticate with the bearer token, not an interactive
-browser OIDC flow, so an identity provider in front would block them. The bearer
-token (plus TLS and, ideally, an IP allowlist) is the access control.
+To use a hosted agent, publish **the MCP** on a DNS hostname and keep MouseSearch
+internal.
 
 ### Where MouseSearch lives (`MOUSESEARCH_URL`)
 
 `MOUSESEARCH_URL` is just a base URL — set it to wherever MouseSearch's **internal
-API** is reachable from the MCP, and the MCP can run anywhere:
+API** is reachable from the MCP:
 
 | Deployment | `MOUSESEARCH_URL` |
 |---|---|
-| In the same Docker stack (default) | `http://mousesearch:5000` |
-| MCP outside the stack, same LAN | `http://<lan-ip>:<published-port>` |
+| Same Docker stack (default) | `http://mousesearch:5000` |
+| MCP outside the stack, same LAN | `http://<homelab-ip>:<published-port>` |
 | MouseSearch exposed publicly | **Don't** — use the internal address above |
 
-If the public hostname is fronted by PocketID, the MCP will fail with a clear error
-telling you to use the internal address (rather than silently returning HTML).
+Pointing `MOUSESEARCH_URL` at a MouseSearch hostname that sits behind an OIDC/SSO
+gateway (e.g. the UI's public URL) will fail: the MCP's headless `/client/*` calls
+get redirected to an HTML login page instead of returning JSON. The server detects
+this and fails with a clear message telling you to use the internal address.
 
-### Nginx Proxy Manager setup
+### Reverse proxy (example: Nginx Proxy Manager)
 
-- **Proxy host:** `mcp.abell.tech` (create a DNS record for it)
-- **Forward hostname/IP:** `mam-mcp` (if NPM shares the stack network) or the host
-  LAN IP, **port:** `8765`, **scheme:** `http`
+- **Proxy host:** `<mcp-host>` (create a DNS record for it)
+- **Forward hostname/IP:** the `mam-mcp` container name (if the proxy shares the
+  stack network) or the host LAN IP, **port:** `8765`, **scheme:** `http`
 - **Custom location:** `/mcp` (optional; keeps the rest of the root unproxied)
 - **Block common exploits:** on
-- **SSL:** request a Let's Encrypt cert, force SSL
-- **Access List:** do **not** attach PocketID/OAuth. An IP allowlist for your
-  agent's egress is fine.
-- Leave `Authorization` and `Accept` passing through untouched. The MCP SDK
-  requires `Accept` to include both `application/json` and `text/event-stream`;
-  a proxy that rewrites it causes `406 Not Acceptable`.
-- Websockets support is no longer required (0.2.0+ returns plain JSON), but
-  harmless if already on.
+- **SSL:** request a certificate, force SSL
+- **Access list:** do **not** attach an interactive OIDC/OAuth gateway. An IP
+  allowlist for your agent's egress is fine.
+- Leave `Authorization` and `Accept` passing through untouched — the SDK requires
+  `Accept` to include both `application/json` and `text/event-stream`.
+- Websockets support is not required (the server returns plain JSON).
 - Advanced (recommended):
 
   ```nginx
-  # Only allow your known agent network / IPs if possible.
-  # allow 203.0.113.0/24;
+  # Optionally restrict to your known agent network / IPs.
+  # allow 203.0.113.0/24;   # TEST-NET example range
   # deny all;
 
   client_max_body_size 4m;
   proxy_read_timeout 120s;
   ```
 
-Then the harness URL becomes `https://mcp.abell.tech/mcp`:
+Then the harness URL becomes `https://<mcp-host>/mcp`:
 
 ```json
 {
   "mcpServers": {
     "mam": {
-      "url": "https://mcp.abell.tech/mcp",
+      "url": "https://<mcp-host>/mcp",
       "headers": { "Authorization": "Bearer <MCP_API_TOKEN>" }
     }
   }
 }
 ```
 
-### Verify the public endpoint
+Verify the public endpoint:
 
 ```bash
-curl -s https://mcp.abell.tech/healthz
-# {"status":"ok","service":"mam-mcp","version":"0.2.1"}
+curl -s https://<mcp-host>/healthz
 
-curl -s -X POST https://mcp.abell.tech/mcp \
+curl -s -X POST https://<mcp-host>/mcp \
   -H "Authorization: Bearer $MCP_API_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 ```
-
-### Security notes for public exposure
-
-- The bearer token is the **only** gate. Treat it like a password: use a long random
-  value and rotate it by updating `MCP_API_TOKEN` if it leaks.
-- Anyone with the token can queue downloads and consume your ratio/buffer. Restrict
-  by IP in NPM if your harness has a stable egress.
-- TLS is required; never expose the plain `8765` port to the internet.
-- The endpoint is stateless and returns plain JSON (no long-lived SSE), so it works
-  cleanly behind a normal reverse proxy.
-- Keep the MCP → MouseSearch link on the internal network; that keeps MouseSearch
-  behind its own access controls and avoids exposing its unauthenticated
-  `/client/add` API to the internet.
 
 ## Configuration reference
 
@@ -308,7 +386,7 @@ curl -s -X POST https://mcp.abell.tech/mcp \
 | `MAM_PROXY_URL` | _(disabled)_ | HTTP proxy for MAM traffic, e.g. `http://gluetun:8888` |
 | `MAM_STATE_FILE` | `./data/mam-state.json` | Rotated cookie persistence |
 | `MAM_REQUEST_TIMEOUT_MS` | `20000` | MAM request timeout |
-| `MOUSESEARCH_URL` | `http://mousesearch:5000` | MouseSearch base URL |
+| `MOUSESEARCH_URL` | `http://mousesearch:5000` | MouseSearch internal base URL |
 | `MOUSESEARCH_TIMEOUT_MS` | `30000` | MouseSearch request timeout |
 | `DEFAULT_CATEGORY` | `audiobooks` | Torrent-client category sent to `/client/add` |
 | `DEFAULT_LANGUAGE` | `English` | Default search language |
@@ -319,8 +397,8 @@ curl -s -X POST https://mcp.abell.tech/mcp \
 | `APP_LOG_LEVEL` | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR` |
 
 `MAM_PROXY_URL` supports `http://` and `https://` proxies. SOCKS is not supported —
-use gluetun's HTTP proxy. Secrets (`MAM_ID`, `MCP_API_TOKEN`, proxy credentials) are
-redacted from all log output.
+use your proxy's HTTP endpoint. Secrets (`MAM_ID`, `MCP_API_TOKEN`, proxy
+credentials) are redacted from all log output.
 
 ## Tools
 
@@ -384,59 +462,24 @@ committing.
 - **Size safety:** `cart_download` refuses items whose size is missing or unparseable
   rather than defaulting to `0 GiB`, which would bypass MouseSearch's buffer check.
 
-## Troubleshooting
-
-### `Head "https://ghcr.io/v2/logabell/mam-mcp/manifests/latest": unauthorized`
-
-The GHCR package is private and Docker is not logged in. Authenticate with a
-**classic** personal access token that has the `read:packages` scope:
-
-1. Create one at
-   <https://github.com/settings/tokens/new?scopes=read:packages&description=mam-mcp-docker-pull>
-2. Log in (as the same user that runs `docker compose`):
-
-   ```bash
-   echo <PAT> | docker login ghcr.io -u logabell --password-stdin
-   docker pull ghcr.io/logabell/mam-mcp:latest
-   ```
-
-`gh auth token` will **not** work here — it returns `403` for GHCR. If Docker runs
-as root (e.g. via `sudo` or rootful Portainer), log in as root too:
-`echo <PAT> | sudo docker login ghcr.io -u logabell --password-stdin`.
-
-Alternative: make the package public so no login is required (the image contains no
-secrets — credentials are only supplied at runtime via env vars). Go to
-<https://github.com/users/logabell/packages/container/mam-mcp/settings> →
-**Change visibility** → **Public**.
-
-### `(root) Additional property mam-mcp is not allowed`
-
-The `mam-mcp:` key is at the top level of the YAML instead of nested under
-`services:`. Keep the service block indented under the `services:` header (see
-[Option A](#3-add-the-container-to-your-stack) / [Option B](#option-b-standalone-compose-project)).
-
-### `search_mam` returns an authentication error
-
-The MAM session's allowed IP/ASN does not match the MCP's egress. Confirm
-`MAM_PROXY_URL` points at the same proxy MouseSearch uses, and that the dedicated
-MAM session allows the provider's ASN.
-
 ## Running from source
 
 ```bash
 npm install
+npm run build
 MAM_ID=... \
 MCP_API_TOKEN=... \
 MCP_HTTP_BIND=127.0.0.1:8765 \
 MAM_STATE_FILE=./data/mam-state.json \
 CART_FILE=./data/cart.json \
 MOUSESEARCH_URL=http://localhost:5000 \
-npm run dev
+npm start
 ```
 
 Useful scripts:
 
 ```bash
+npm run dev         # tsx src/index.ts (watch-free dev run)
 npm run typecheck   # tsc --noEmit
 npm run build       # tsc -> dist/
 npm start           # node dist/index.js
@@ -448,18 +491,72 @@ Build the container locally:
 docker build -t mam-mcp:local .
 ```
 
+## Troubleshooting
+
+### `search_mam` returns an authentication error
+
+The MAM session's allowed IP/ASN does not match the MCP's egress. Confirm
+`MAM_PROXY_URL` points at the same proxy MouseSearch uses, and that the dedicated
+MAM session allows the provider's ASN.
+
+### `get_client_status` fails with "MouseSearch returned HTML/redirect"
+
+`MOUSESEARCH_URL` is pointing at a MouseSearch URL that sits behind an OIDC/SSO
+gateway (the UI's public hostname) instead of the internal API. Use
+`http://mousesearch:5000` (same stack) or the internal IP/port.
+
+### `Head "https://ghcr.io/v2/logabell/mam-mcp/manifests/latest": unauthorized`
+
+The GHCR package is private and Docker is not logged in. Authenticate with a
+**classic** personal access token that has the `read:packages` scope:
+
+1. Create one at
+   <https://github.com/settings/tokens/new?scopes=read:packages&description=mam-mcp-docker-pull>
+2. Log in (as the same user that runs `docker compose`):
+
+   ```bash
+   echo <PAT> | docker login ghcr.io -u <github-user> --password-stdin
+   docker pull ghcr.io/logabell/mam-mcp:latest
+   ```
+
+`gh auth token` will **not** work here — it returns `403` for GHCR. If Docker runs
+as root (e.g. via `sudo` or rootful Portainer), log in as root too:
+`echo <PAT> | sudo docker login ghcr.io -u <github-user> --password-stdin`.
+
+Alternative: build the image locally (`docker build -t mam-mcp:local .`) or make
+the package public so no login is required (the image contains no secrets —
+credentials are only supplied at runtime via env vars).
+
+### `(root) Additional property mam-mcp is not allowed`
+
+The `mam-mcp:` key is at the top level of the YAML instead of nested under
+`services:`. Keep the service block indented under the `services:` header (see
+[step 3](#3-run-the-server)).
+
 ## Publishing the image
 
 Pushing to `main` (or a `v*` tag, or manual dispatch) triggers
 [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml):
 
 1. `verify` runs `npm ci`, `npm run typecheck`, and `npm run build`.
-2. `publish` builds the image and pushes it to `ghcr.io/<owner>/<repo>` using the
-   built-in `GITHUB_TOKEN`.
+2. `publish` builds the image and pushes it to `ghcr.io/logabell/mam-mcp` using
+   the built-in `GITHUB_TOKEN`.
 
 Tags produced: `latest` (default branch), branch name, and `v*` semver tags. After
 the first successful run, make the GHCR package private if desired under
 **GitHub → Packages → mam-mcp → Package settings**.
+
+## Security notes
+
+- The bearer token is the **only** gate. Treat it like a password: use a long random
+  value and rotate it by updating `MCP_API_TOKEN` if it leaks.
+- Anyone with the token can queue downloads and consume your ratio/buffer. Restrict
+  access by IP at the proxy if your harness has a stable egress.
+- TLS is required for any public exposure; never expose the plain `8765` port to
+  the internet.
+- Keep the MCP → MouseSearch link on the internal network. MouseSearch's
+  `/client/add` API is unauthenticated and should not be exposed publicly.
+- `MAM_ID` is never exposed to the model, and secrets are redacted from logs.
 
 ## Compliance note
 
