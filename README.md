@@ -147,7 +147,7 @@ EOF
 set -a && . ./.env && set +a
 
 curl http://<homelab-ip>:8765/healthz
-# {"status":"ok","service":"mam-mcp","version":"0.2.0"}
+# {"status":"ok","service":"mam-mcp","version":"0.2.1"}
 
 curl -s -X POST "$MAM_MCP_URL" \
   -H "Authorization: Bearer $MAM_MCP_TOKEN" \
@@ -200,22 +200,54 @@ reach it from a hosted harness.
 
 ## Using it from outside your LAN
 
-The MCP is designed to talk to MouseSearch **internally** (`http://mousesearch:5000`),
-so MouseSearch's public URL (`library.abell.tech`) and PocketID are irrelevant here.
-To use the MCP from a remote agent, expose **the MCP** through your reverse proxy on
-its own hostname — do **not** point the MCP at MouseSearch's public URL, and do not
-put PocketID in front of the MCP.
+There are two links in the chain, and they want opposite treatment:
+
+```
+remote harness ──HTTPS + Bearer──► MCP (public, via reverse proxy)
+                                     └── internal only ──► MouseSearch ──► gluetun ──► MAM
+```
+
+- **Expose the MCP.** Put it behind your reverse proxy on its own hostname and
+  authenticate with the bearer token.
+- **Keep MouseSearch internal.** Do **not** point the MCP at MouseSearch's public
+  URL, and do not put PocketID in front of the MCP. MouseSearch's public hostname
+  is UI-only and PocketID-protected, so the MCP's headless `/client/*` and
+  `/mam/user_data` calls would be redirected to an HTML login page instead of
+  returning JSON.
 
 Why not PocketID: MCP clients authenticate with the bearer token, not an interactive
 browser OIDC flow, so an identity provider in front would block them. The bearer
 token (plus TLS and, ideally, an IP allowlist) is the access control.
 
-Nginx Proxy Manager setup:
+### Where MouseSearch lives (`MOUSESEARCH_URL`)
+
+`MOUSESEARCH_URL` is just a base URL — set it to wherever MouseSearch's **internal
+API** is reachable from the MCP, and the MCP can run anywhere:
+
+| Deployment | `MOUSESEARCH_URL` |
+|---|---|
+| In the same Docker stack (default) | `http://mousesearch:5000` |
+| MCP outside the stack, same LAN | `http://<lan-ip>:<published-port>` |
+| MouseSearch exposed publicly | **Don't** — use the internal address above |
+
+If the public hostname is fronted by PocketID, the MCP will fail with a clear error
+telling you to use the internal address (rather than silently returning HTML).
+
+### Nginx Proxy Manager setup
 
 - **Proxy host:** `mcp.abell.tech` (create a DNS record for it)
-- **Forward hostname/IP:** `mam-mcp` (or the container IP), **port:** `8765`
-- **Scheme:** `http`, **Block common exploits:** on, **Websockets support:** on
+- **Forward hostname/IP:** `mam-mcp` (if NPM shares the stack network) or the host
+  LAN IP, **port:** `8765`, **scheme:** `http`
+- **Custom location:** `/mcp` (optional; keeps the rest of the root unproxied)
+- **Block common exploits:** on
 - **SSL:** request a Let's Encrypt cert, force SSL
+- **Access List:** do **not** attach PocketID/OAuth. An IP allowlist for your
+  agent's egress is fine.
+- Leave `Authorization` and `Accept` passing through untouched. The MCP SDK
+  requires `Accept` to include both `application/json` and `text/event-stream`;
+  a proxy that rewrites it causes `406 Not Acceptable`.
+- Websockets support is no longer required (0.2.0+ returns plain JSON), but
+  harmless if already on.
 - Advanced (recommended):
 
   ```nginx
@@ -223,7 +255,6 @@ Nginx Proxy Manager setup:
   # allow 203.0.113.0/24;
   # deny all;
 
-  # Keep the endpoint reachable; MCP uses POST with JSON responses.
   client_max_body_size 4m;
   proxy_read_timeout 120s;
   ```
@@ -241,7 +272,20 @@ Then the harness URL becomes `https://mcp.abell.tech/mcp`:
 }
 ```
 
-Security notes for public exposure:
+### Verify the public endpoint
+
+```bash
+curl -s https://mcp.abell.tech/healthz
+# {"status":"ok","service":"mam-mcp","version":"0.2.1"}
+
+curl -s -X POST https://mcp.abell.tech/mcp \
+  -H "Authorization: Bearer $MCP_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+```
+
+### Security notes for public exposure
 
 - The bearer token is the **only** gate. Treat it like a password: use a long random
   value and rotate it by updating `MCP_API_TOKEN` if it leaks.
@@ -250,6 +294,9 @@ Security notes for public exposure:
 - TLS is required; never expose the plain `8765` port to the internet.
 - The endpoint is stateless and returns plain JSON (no long-lived SSE), so it works
   cleanly behind a normal reverse proxy.
+- Keep the MCP → MouseSearch link on the internal network; that keeps MouseSearch
+  behind its own access controls and avoids exposing its unauthenticated
+  `/client/add` API to the internet.
 
 ## Configuration reference
 

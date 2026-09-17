@@ -48,6 +48,17 @@ export class MouseSearchClient {
         signal: controller.signal,
       });
       const text = await response.text();
+      const contentType = response.headers.get("content-type") ?? "";
+      const looksHtml = /text\/html/i.test(contentType) || /^\s*<(!doctype|html)/i.test(text);
+      if (response.redirected || looksHtml) {
+        this.logger.error(
+          `MouseSearch returned a non-API response at ${path} (redirected=${response.redirected}, contentType=${contentType || "unknown"})`,
+        );
+        throw new Error(
+          "MouseSearch returned HTML/redirect (likely a PocketID/auth proxy in front of the API). " +
+            "Point MOUSESEARCH_URL at the internal address (e.g. http://mousesearch:5000) — the public hostname is UI-only.",
+        );
+      }
       let data: unknown = null;
       if (text.trim()) {
         try {

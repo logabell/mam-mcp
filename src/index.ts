@@ -21,7 +21,7 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(left, right);
 }
 
-const VERSION = "0.2.0";
+const VERSION = "0.2.1";
 
 function createMcpServer(ctx: AppContext): McpServer {
   const server = new McpServer({ name: "mam-mcp", version: VERSION });
